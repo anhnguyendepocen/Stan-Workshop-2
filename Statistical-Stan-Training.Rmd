@@ -1,0 +1,370 @@
+---
+title: "Statistical Model Fitting in Stan"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+author: "Thomas Crellen"
+date: "`r Sys.Date()`"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteIndexEntry{Statistical Model Fitting in Stan: An Introduction}
+  %\VignetteEncoding{UTF-8}
+#output: pdf_document
+fig_caption: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Introduction
+
+This workshop aims to walk you through the basics of fitting statistical models with the Stan programming language. The layout of this course is inspired by the Statistical Rethinking textbook^[McElreath, R., 2018. Statistical Rethinking: A Bayesian Course with Examples in R and Stan. CRC Press.].
+
+This course will cover:
+
+- Linear Models
+- Generalised Linear Models
+- Hierarchical Models
+- Model Comparison
+
+In this practical we use only basic regression models that make few assumptions about the underlying data-generating process, but once the mechanics of Stan are understood the approach can be extended to more realistic process or ecological models^[Hilborn, R. and Mangel, M., 1997. The ecological detective: confronting models with data (Vol. 28). Princeton University Press.] ^[Bolker, B.M., 2008. Ecological models and data in R. Princeton University Press.]. It is important to consider that there is no 'correct' model and that several models may be consistent with the data.
+
+The steps for modelling are 1) collect data, 2) define a plausible model, 3) estimate the parameters of the model most consistent with the data, and 4) evaluate the model output. The third step can be referred to as 'model fitting', 'parameter inference' or 'parameter estimation', and there are a number of methods to achieve this:
+
+- Least Squares
+- Maximum Likelihood
+- Markov Chain Monte Carlo (MCMC)
+
+In the first problem we will tackle, linear regression, all three of these methods can be applied. However, least squares and maximum likelihood become unfeasable for more complex models and by the end of the practical we will encounter models that can only be fit through MCMC. As MCMC is a Bayesian method, we obtain distributions of our estimated parameters, which is useful for measuring uncertainty and can be used in agent-based simulations. Furthermore, we can incorporate prior information into our models. 
+
+
+### Stan
+Stan is a 'probabilistic programming language', or more operationally a method to run MCMC through R or python. Stan was developed by Andrew Gelman, an influential statistician at Columbia University. Uptake of the software is still growing and the best sources of learning materials are often recent blog posts by researchers. Unlike older methods for MCMC:
+
+- Stan uses Hamiltonian Monte Carlo, a method that results in faster model fitting compared with Gibbs sampling or a Metropolis-Hastings algorithm
+- Is supported by a development team, and so will likely improve as time goes on
+
+In contrast to the Statistical Rethinking textbook, which interfaces Stan through a seperate package, in this practical we will be using the language directly.
+
+## Linear Models
+
+It's likely that you are familiar with linear regression, but using this as a first example serves a pedagogical purpose. 
+
+For a continous outcome variable, indexed $i$, we consider how the expected value of this variable ($\mu$) is related to a predictor variable, where the relationship is defined by the coefficient, or slope, $\beta$:  
+
+$\mu_i = \beta \times predictor_i$
+
+We consider the error around $\mu$ to follow a normal, or Gaussian, distribution with standard deviation $\sigma$.
+
+$outcome_i \sim Normal(\mu_i, \sigma)$
+
+As this is a Bayesian model, all parameters have their own prior distributions
+
+$\beta \sim Normal(0, 10)$
+
+$\sigma \sim Normal(1, 5)$
+
+Note that we can add additional linear combinations of predictor variables (also known as explanatory variable, covariates or independent variables) and coefficients to our model if we want explore how multiple predictors influence the outcome variable. In this first example, we will generate our own data and then use the model to retrieve the parameters.
+
+```{r Fig1, fig.height = 4, fig.width = 5, cache=TRUE}
+#define parameters (we will recover these later)
+beta <- 3
+sigma <- 7
+#create the explanatory variable
+explanatory <- rnorm(n=100, mean=50, sd=4)
+#linear function 
+mu <- explanatory*beta
+#outcome variable
+outcome <- rnorm(n=100, mean=mu, sd=sigma)
+plot(outcome~explanatory)
+```
+
+Now we have simulated our data, we store these in a list and set up our model in Stan code:
+
+```{r message=FALSE}
+data <- list(
+  explanatory = explanatory,
+  outcome = outcome,
+  #N is the number of observations, in this case 100
+  N = length(outcome))
+
+#Load the R Stan library
+library(rstan)
+
+#define the model
+linear.mod <-'
+data{
+    int<lower=1> N;                         //number of observations
+    real<lower=0> explanatory[N];           //explanatory variable
+    real<lower=0> outcome[N];               //outcome variable
+}
+parameters{
+    real beta;                              //beta (coefficient)
+    real<lower=0> sigma;                    //sigma (standard deviation)
+}
+model{
+    vector[N] mu;                           //vector to store values of mu
+    beta ~ normal(0, 10);                   //prior for beta
+    sigma ~ normal(1, 5);                   //prior for sigma
+
+    for(i in 1:N){
+        mu[i] = beta*explanatory[i];        //linear function
+    }
+    outcome ~ normal(mu, sigma);            //regression
+}'
+```
+Note that we are defining three blocks in the Stan code; data, parameters and model. Stan has a variety of object formats, here we only encounter "real" numbers which can take on any value and "int" which are integers. The Stan manual has extensive documentation on all object types^[http://mc-stan.org/users/]. The values of variables can also be contstrained by `<lower=n>` and `<upper=m>`, for instance we contrain the lower value of sigma at zero as standard deviations cannot be negative. An alternative would be to use a prior distribution that is strictly positive, such as a gamma or exponential distribution.
+
+Prior distributions can be chosen according to your knowledge of the problem or based on a philosophy (e.g. maximum entropy). It is generally recommended that you do not use uniform or flat priors for two reasons, 1) these are very informative; if we set a prior for the mean with `uniform(1,10)` we are giving a probablity of zero to any value >10, 2) uniform priors do not work well with the fitting mechanics of Stan. There's a blog post by Andrew Gelman which discusses choices of priors where he generally recommends normal distributions^[https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations] and from my own experience normal priors tend to give better model convergence.
+
+```{r message=FALSE, results = "hide", cache = TRUE}
+#run the model
+stan.1 <- stan(model_code=linear.mod, data=data,
+          iter=3000,warmup=1000,chains=1, cores=1)
+```
+To get a summary of the output from the model we have just run, type `summary(stan.1)`.
+The `rhat` value is a measure of model convergence (i.e. if the markov chains have reached a stable value) called the 'Gelman-Rubin diagnostic'. In general if rhat >1 this suggests the chains have not converged satisfactorily and the model should be run for a larger number of iterations.
+
+```{r, fig.show='hold', fig.height=4, fig.width=5, fig.align='left'}
+#extract samples from the posterior distribution
+post.1 <- extract(stan.1)
+
+#examine markov chains
+plot(post.1$beta)
+lines(post.1$beta)
+plot(post.1$sigma)
+lines(post.1$sigma)
+```
+```{r, fig.show='hold', fig.width=5, fig.height=4}
+#examine posterior distributions and means
+plot(density(post.1$beta), main="Beta", xlab=NA)
+abline(v = mean(post.1$beta), lty=2)
+plot(density(post.1$sigma), main="Sigma", xlab=NA)
+abline(v = mean(post.1$sigma), lty=2)
+```
+
+Examining these plots, we can see that our mean parameter estimates are close to the values for beta (3) and sigma (7) that were defined when we simulated the data.
+
+We can use the mean of the posterior for beta as the regression line, which we add to the scatter plot shown earlier. Note that as we have not fitted an intercept term, our model implies that when explanatory=0 then outcome=0, and the regression line must pass through the point (0,0).
+
+```{r Fig2, fig.width=5, fig.height=4}
+beta_median <- median(post.1$beta)
+plot(outcome~explanatory)
+abline(a=0, b=beta_median)
+```
+
+We can quantify the uncertainty around our parameter estimates in a number of ways, the simplest is a credible interval, which reports two parameter values that contain a specified probability mass between them. For instance, to quantify the 95% credible interval around the beta parameter:
+
+```{r results = "hide"}
+quantile(post.1$beta, probs = c(0.025,0.975))
+```
+
+It is important to realise that there are two kinds of uncertainty in our model, i) uncertainty in our parameter values and ii) uncertainty in the sampling process. The first kind of uncertainty is equivalent to calculating values of $\mu$ from our estimate of $\beta$, the second is equivalent to using estimated values of $\mu$ within the normal likelihood function along with our estimate of uncertainty $\sigma$.
+
+### Activity 1
+
+The posterior parameter distributions obtained from the model can be used to make predictions. Imagine that the linear regression we performed was in fact looking at the correlation between weight (explanatory; kg) and height (outcome; cm) in a population of adults.
+
+A. Find the expected height ($\mu$) for an individual weighing 70kg.
+
+B. Find the 95% credible interval around the simulated outcome, including the normally distributed error, for an individual weighing 70kg.
+
+C. Compare the Stan parameter estimates to a least-squares fit using the function `lm()`
+
+## Generalised linear models
+
+In the previous example, our likelihood was a normal distribution. What if we wanted to use a different kind of distribution for our likelihood, such as a binomial or a poisson distribution? In fact this is not much of an extension of the linear model we fitted above. 
+
+Consider the binomial likelihood function:
+
+$y \sim binomial(n, p)$ 
+
+Here the outcome ($y$) is the number of 'successes' from $n$ trials, where the probability of success in any trial is $p$. From data we typically have $y$ and $n$ and we want to estimate $p$. This may seem simple, however, we want to simultaneously measure the impact of one or more predictor variables on $p$. 
+
+The problem we run into is that a linear combination of predictors and coefficients can take on any range of values from $\infty$ to $-\infty$, while a probability is bounded from 0 to 1. For this reason we must transform the linear function using a link function, in this case the logit link function. 
+
+$logit(p_i) = \alpha + \beta_1x_1 + \beta_2x_2 ...$
+
+Confusingly, the logit function transforms probabilities onto a continuous scale. To go from continuous $\rightarrow$ probabilities we need the inverse logit, or logistic function. This does not exist in base R, so write the function as:
+
+```{r}
+logistic <- function(x){
+  odds <- exp(x)
+  prob <- odds/(odds+1)
+  return(prob)
+}
+```
+
+Take your new function for a spin by converting values from -10 to 10 onto the probability scale:
+
+```{r fig.width=5, fig.height=4}
+c <- seq(from=-10, to=10, by=0.1)
+p <- sapply(c, logistic)
+plot(p~c, xlab="Continuous Scale", ylab="Probability Scale")
+```
+
+### Ward Colonisation Example
+
+As a motivation for binomial regression, imagine we are looking into colonisation rates with ESBL-producing $Klebsiella$ $pneumoniae$ in a hospital in a developing country. We want to model how the probability of becoming colonised is a function of the number of patients already colonised on the same ward on the same day^[Forrester, M. and Pettitt, A.N., 2005. Use of stochastic epidemic modeling to quantify transmission rates of colonization with methicillin-resistant Staphylococcus aureus in an intensive care unit. Infection Control & Hospital Epidemiology, 26(7), pp.598-606.].
+
+In this example, patients had rectal swabs taken every day and so we model each day as a seperate trial (in reality swabbing usually takes place every couple of days, which complicates the analysis). Patients can also be colonised at entry, so that the number of patients carrying ESBL $K.$ $pneumoniae$ can fluctuate from day to day.
+
+Load the data into R:
+```{r echo=FALSE}
+hosp <- read.table("/Users/thomascrellen/Desktop/hospital-colon.txt", header=T)
+```
+
+`hosp <- read.table("<PATH-TO-FILE/hospital-colon.txt", header=T)`
+
+```{r message=FALSE, results = "hide", cache = TRUE}
+data.2 <- list(
+          atRisk <- hosp$N_atRisk,
+          events <- hosp$N_acquisitions,
+          colonised <- hosp$N_colonised,
+          N=nrow(hosp)
+)
+
+binom.mod <-'
+data{
+    int<lower=1> N;                         //number of observations
+    int<lower=0> atRisk[N];                 //patient at risk (trials)
+    int<lower=0> events[N];                 //new colonisations (events)
+    int<lower=0> colonised[N];              //patients already colonised
+}
+parameters{
+    real alpha;                             //alpha (intercept)
+    real beta;                              //beta (coefficient)
+}
+model{
+    vector[N] p;                            //vector to store values of p
+    alpha ~ normal(0, 10);                  //prior for alpha
+    beta ~ normal(0, 10);                   //prior for beta
+
+    for(i in 1:N){
+        //linear function converted to probability scale
+        p[i] = inv_logit(alpha + beta*colonised[i]);
+    }
+    events ~ binomial(atRisk, p);            //regression
+}'
+
+#run the model
+stan.2 <- stan(model_code=binom.mod, data=data.2,
+          iter=5000,warmup=2500,chains=1, cores=1)
+
+#extract the posterior
+post.2 <- extract(stan.2)
+```
+
+As before, inspect the markov chains and posterior parameter distributions in the `post.2` object. Note that in this model there is an intercept term, alpha.
+
+As a result of the logit link function, model parameters are now on the log-odds scale. To get odds ratios from the parameters, take the exponent with `exp()` and to convert onto the probability scale use the `logistic()` function. 
+
+Think now about the meaning of the parameters alpha (intercept) and beta (coefficient). Alpha is the probability of colonisation when $\beta \times colonised$ is set to zero, i.e. there are no colonised patients present. We might expect this value to be zero, though there are biological reasons why this might not be the case (hospital staff are colonised, the organism has persisted in the environment, colonised patients have false negative swabs). 
+
+Beta is the probability of colonisation per-case per-day. Therefore, to calculate the probability of colonisation for a susceptible patient when there are 5 colonised patients on the same ward:
+
+```{r}
+p_N5 <- logistic(post.2$alpha + post.2$beta*5)
+```
+To calculate the expected number of new colonisation events in a given day, we would use this probability distribution within the binomial probability function to account for the uncertainty of the sampling process.
+
+### Activity 2
+
+A. Given a binary covariate with an odds ratio of 5, how does this alter the probability of an event when the intercept is i) -6 on the log-odds scale, ii) -2 on the log-odds scale, and iii) 3 on the log-odds scale
+
+B. Calculate the mean and 95% credible interval for the probability of a susceptible patient being colonised when there are 2 colonised patients on a ward.
+
+C. Calculate the mean and 95% credible interval for the number of colonisation events when there are 5 colonised patients on the ward and 15 susceptible patients. 
+
+
+## Hierarchical Models
+
+In the previous model, we fitted a single intercept and slope to our data. Examining the `data.frame` `hosp` shows that the data were taken from four different wards (A-D). This is an example of 'clustering' in the data, or we could state that the ward is a 'random effect'. Definitions of fixed and random effects are contentious, see this CrossValidated discussion^[https://stats.stackexchange.com/questions/4700/what-is-the-difference-between-fixed-effect-random-effect-and-mixed-effect-mode]. Operationally, we can think of fixed effects as being conventional covariates that may impact on on our outcome (sex, age, weight, co-infections) and random effects as 'structure' in the data that impact on the variance of the outcome (time points, villages, individuals). Models that include both can be termed mixed effect or hierarchical models.
+
+Some examples:
+
+- Testing the prevalence of malaria in 10 villages where 100 people are sampled in each village (village is a random effect)
+- Providing mass drug administration over 4 time points in 2 years (time point is a random effect)
+- Looking at the pharmacodynamics of a drug everyday for 30 days in 8 patients (patient is a random effect)
+
+If we identify clusters in our data, we have three choices about how to account for this in a model:
+
+1. Do nothing. Here we ignore the structure and fit a single intercept. This was the case in the last example, and implicitly in most analyses. In doing so, we average over the variance between clusters. This may mask important sub-group effects. We can describe this as underfitting.
+
+2. Calculate a seperate intercept for each cluster. In this case we are saying that the clusters are completely dissimilar. This approach is liable to overfitting, in that clusters with small amounts of data may take on unusual values. It may underpower the analysis as the model is fitting so many parameters.
+
+3. Calculate intercepts for each cluster with 'partial pooling'. In this case we allow the intercept to vary by cluster, but the intercepts are drawn from a common distribution and 'learn' from each other. We calculate a global mean that is simular to the single intercept, and clusters with extreme values are shrunk towards the mean. In doing so, we account for variation between clusters without overfitting.
+
+We will now fit the ward colonisation model as a hierarchical model.
+
+### Colonisation rates by ward
+
+```{r message=FALSE, warning=FALSE, results = "hide", cache = TRUE}
+#create numeric identifier for each hospital ward
+data.2$ward <- c(rep(1, 30), rep(2, 30), rep(3, 30), rep(4, 30))
+#number of wards
+data.2$N_ward <- 4
+
+ward.mod <- '
+data{
+    int<lower=1> N;                         //number of observations
+    int<lower=0> atRisk[N];                 //patient at risk (trials)
+    int<lower=0> events[N];                 //new colonisations (events)
+    int<lower=0> colonised[N];              //patients already colonised
+    int<lower=1> N_ward;                    //number of wards (4)
+    int<lower=1> ward[N];                   //references the ward
+}
+parameters{
+    real alpha[N_ward];                     //alpha (intercept), now indexed by ward
+    real beta;                              //beta (coefficient)
+    real mu;                                //global mean of intercepts
+    real<lower=0> sigma;                    //variance of intercepts
+}
+model{
+    vector[N] p;                            //vector to store values of p
+    alpha ~ normal(mu, sigma);              //alpha, now contains hyperpriors
+    beta ~ normal(0, 10);                   //prior for beta
+    mu ~ normal(0, 10);                     //prior for global mean
+    sigma ~ normal(1, 5);                   //prior for variance
+
+    for(i in 1:N){
+        //linear function converted to probability scale
+        p[i] = inv_logit(alpha[ward[i]] + beta*colonised[i]);
+    }
+    events ~ binomial(atRisk, p);            //regression
+}'
+
+#run the model - note we will now run three parallel chains
+stan.3 <- stan(model_code=ward.mod, data=data.2,
+          iter=10000,warmup=6000,chains=3, cores=3, thin=2)
+
+#extract the posterior
+post.3 <- extract(stan.3)
+```
+
+A quick way to investigate the posterior parameter distributions is `plot(stan.3)`. Notice that we have seperately estimated intercepts for all 4 wards along with the global mean (mu). Are there differences between wards, and does this matter? Remember that the intercept is showing the background colonisation rate in the absence of cases.
+
+It might be more interesting to explore how the probability of colonisation per-patient per-day varies by ward. In this case we would allow beta to vary by ward.
+
+There are more complex hierarchical models where we estimate seperate intercepts and allow the effect of covariates (slopes) to vary by cluster. These 'random slopes' models are beyond the scope of this practical but are discussed in Chapter 13 of Statistical Rethinking.  
+
+### Activity 3
+
+A. Set up a hierarchical model as above, but with a single intercept and a beta term that varies by ward (with partial pooling). 
+
+B. Using the output from this model, estimate the probability of colonisation (mean and 95% credible intervals) for a susceptible patient in each ward when there are 5 colonised patients on the ward. 
+
+## Model Comparison
+
+How do we compare between multiple competing models? The automated "stepwise" approaches for covariate selection have no theoretical justification and should not be adopted, despite their persistance in epidemiology^[Whittingham, M.J., Stephens, P.A., Bradbury, R.B. and Freckleton, R.P., 2006. Why do we still use stepwise modelling in ecology and behaviour?. Journal of animal ecology, 75(5), pp.1182-1189.]. A preferable approach would be to produce several models which are each compatible with our knowledge of the problem and then use information criterion to exclude less well supported models. A model can never be truly "correct", as it is by definition a simplification of a system. Models can be iteratively improved, however it is up to the researcher to weigh model realism against complexity. 
+
+To apply information criteria in Stan, it is necessary to calculate the log-likelihood in the generated quantities block. The `loo` package by the makers of Stan provides a method to perform WAIC (widely applicable information criterion) and LOO-CV (leave-one-out cross validation)^[https://cran.r-project.org/web/packages/loo/vignettes/loo2-with-rstan.html].
+
